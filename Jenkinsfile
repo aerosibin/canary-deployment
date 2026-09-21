@@ -5,20 +5,25 @@ pipeline {
         TAG = "${env.BUILD_ID}"
     }
     stages {
+        stage('Build Image') {
+            steps {
+                bat 'docker build -t %IMAGE_NAME%:%TAG% .'
+            }
+        }
+
         stage('Initialize Stable Environment') {
             steps {
-                // Boot a stable baseline on the very first run if it doesn't exist
+                // Starts Nginx and the REAL application as the baseline
                 bat '''
                     docker network inspect app-network >nul 2>&1 || docker network create app-network
-                    docker ps --format "{{.Names}}" | findstr "node-stable" >nul 2>&1 || docker run -d --name node-stable --network app-network -e APP_VERSION=v1-stable node:20-alpine sh -c "echo 'Baseline' && sleep infinity" 
                     docker ps --format "{{.Names}}" | findstr "nginx-router" >nul 2>&1 || docker run -d --name nginx-router -p 8000:80 --network app-network nginx:alpine
+                    docker ps --format "{{.Names}}" | findstr "node-stable" >nul 2>&1 || docker run -d --name node-stable --network app-network -e APP_VERSION=v1-stable %IMAGE_NAME%:%TAG%
                 '''
             }
         }
 
-        stage('Build & Deploy Canary') {
+        stage('Deploy Canary') {
             steps {
-                bat 'docker build -t %IMAGE_NAME%:%TAG% .'
                 bat '''
                     docker rm -f node-canary >nul 2>&1 || true
                     docker run -d --name node-canary --network app-network -e APP_VERSION=v2-canary %IMAGE_NAME%:%TAG%
