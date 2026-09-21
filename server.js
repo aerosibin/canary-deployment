@@ -4,7 +4,7 @@ const PORT = 3000;
 
 app.get('/status', (req, res) => {
     res.json({
-        status: "success, Good",
+        status: "success",
         version: process.env.APP_VERSION || "v1-stable",
         timestamp: new Date().toISOString()
     });
