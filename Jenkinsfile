@@ -1,76 +1,40 @@
 pipeline {
     agent any
-
     environment {
-        IMAGE_NAME = 'aerosibin/blue-green-api' 
-        DOCKERHUB_CREDS = 'dockerhub-credentials'
+        IMAGE_NAME = 'aerosibin/canary-api'
         TAG = "${env.BUILD_ID}"
     }
-
     stages {
-        stage('Initialize Network & Router') {
+        stage('Initialize Stable Environment') {
             steps {
-                // Ensure a shared Docker network and the Nginx proxy exist
+                // Boot a stable baseline on the very first run if it doesn't exist
                 bat '''
                     docker network inspect app-network >nul 2>&1 || docker network create app-network
+                    docker ps --format "{{.Names}}" | findstr "node-stable" >nul 2>&1 || docker run -d --name node-stable --network app-network -e APP_VERSION=v1-stable node:20-alpine sh -c "echo 'Baseline' && sleep infinity" 
                     docker ps --format "{{.Names}}" | findstr "nginx-router" >nul 2>&1 || docker run -d --name nginx-router -p 8000:80 --network app-network nginx:alpine
                 '''
             }
         }
 
-        stage('Build & Push to Docker Hub') {
+        stage('Build & Deploy Canary') {
             steps {
-                bat "docker build -t %IMAGE_NAME%:%TAG% ."
-                withCredentials([usernamePassword(credentialsId: env.DOCKERHUB_CREDS, passwordVariable: 'DOCKER_PWD', usernameVariable: 'DOCKER_USR')]) {
-                    bat """
-                        docker login -u %DOCKER_USR% -p %DOCKER_PWD%
-                        docker push %IMAGE_NAME%:%TAG%
-                    """
-                }
-            }
-        }
-
-        stage('Determine Target Environment') {
-            steps {
-                script {
-                    // If node-blue is running, deploy to green next. Otherwise, deploy to blue.
-                    def isBlueRunning = bat(script: 'docker ps --format "{{.Names}}" | findstr "node-blue"', returnStatus: true) == 0
-                    env.ACTIVE_ENV = isBlueRunning ? 'blue' : 'green'
-                    env.TARGET_ENV = isBlueRunning ? 'green' : 'blue'
-                    echo "Current active environment: ${env.ACTIVE_ENV}"
-                    echo "Deploying new version to: ${env.TARGET_ENV}"
-                }
-            }
-        }
-
-        stage('Deploy Target Environment') {
-            steps {
+                bat 'docker build -t %IMAGE_NAME%:%TAG% .'
                 bat '''
-                    docker rm -f node-%TARGET_ENV% >nul 2>&1 || true
-                    docker run -d --name node-%TARGET_ENV% --network app-network -e NODE_ENV=%TARGET_ENV% %IMAGE_NAME%:%TAG%
+                    docker rm -f node-canary >nul 2>&1 || true
+                    docker run -d --name node-canary --network app-network -e APP_VERSION=v2-canary %IMAGE_NAME%:%TAG%
                 '''
             }
         }
 
-        stage('Health Check') {
-            steps {
-                // Allow Node.js to boot, then verify the /status endpoint using the internal Docker network
-                bat '''
-                    timeout /t 5 /nobreak >nul
-                    docker exec nginx-router wget -qO- http://node-%TARGET_ENV%:3000/status
-                '''
-            }
-        }
-
-        stage('Switch Traffic (Zero Downtime)') {
+        stage('Shift 10% Traffic to Canary') {
             steps {
                 script {
-                    // Generate a new Nginx configuration pointing to the freshly validated container
-                    def nginxConfig = """
+                    def canaryConfig = """
                     events {}
                     http {
                         upstream backend {
-                            server node-${env.TARGET_ENV}:3000;
+                            server node-stable:3000 weight=9;
+                            server node-canary:3000 weight=1;
                         }
                         server {
                             listen 80;
@@ -80,9 +44,8 @@ pipeline {
                         }
                     }
                     """
-                    writeFile file: 'nginx.conf', text: nginxConfig
+                    writeFile file: 'nginx.conf', text: canaryConfig
                 }
-                // Inject the new config into the router and gracefully reload
                 bat '''
                     docker cp nginx.conf nginx-router:/etc/nginx/nginx.conf
                     docker exec nginx-router nginx -s reload
@@ -90,10 +53,34 @@ pipeline {
             }
         }
 
-        stage('Teardown Old Environment') {
+        stage('Promote Canary to Stable') {
             steps {
-                // Remove the old container to free up resources
-                bat 'docker rm -f node-%ACTIVE_ENV% >nul 2>&1 || true'
+                input message: 'Canary looks healthy. Promote to 100% traffic?'
+                
+                script {
+                    def stableConfig = """
+                    events {}
+                    http {
+                        upstream backend {
+                            server node-stable:3000 weight=10;
+                        }
+                        server {
+                            listen 80;
+                            location / {
+                                proxy_pass http://backend;
+                            }
+                        }
+                    }
+                    """
+                    writeFile file: 'nginx-stable.conf', text: stableConfig
+                }
+                
+                bat '''
+                    docker rm -f node-stable
+                    docker rename node-canary node-stable
+                    docker cp nginx-stable.conf nginx-router:/etc/nginx/nginx.conf
+                    docker exec nginx-router nginx -s reload
+                '''
             }
         }
     }

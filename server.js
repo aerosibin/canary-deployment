@@ -5,12 +5,9 @@ const PORT = 3000;
 app.get('/status', (req, res) => {
     res.json({
         status: "success",
-        message: "The Node.js API is running smoothly. Changes are made now and committed to GitHub",
-        active_environment: process.env.NODE_ENV || "standalone",
+        version: process.env.APP_VERSION || "v1-stable",
         timestamp: new Date().toISOString()
     });
 });
 
-app.listen(PORT, () => {
-    console.log(`Server is listening on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Listening on port ${PORT}`));
